@@ -256,6 +256,20 @@ const sessions = new Map();
 const SESSION_TIMEOUT_MS = CONFIG.sessionTimeoutMs;
 const MAX_SNAPSHOT_NODES = 500;
 const TAB_INACTIVITY_MS = CONFIG.tabInactivityMs;
+
+// Viewport alignment (hermes-patches). Set via env, defaults to the Xvfb
+// resolution so the browser window, Playwright viewport, Camoufox spoofed
+// `window.innerWidth/innerHeight`, and screenshot output ALL match.
+// Root cause of the previous 400px-crop bug: Playwright's viewport was
+// hardcoded 1280x720 while Camoufox's stealth layer spoofed innerWidth=1680,
+// so pages laid out for 1680 but screenshots captured only 1280 — right
+// 400px clipped. Pinning `window: [W, H]` forces Camoufox's outer size,
+// and the per-page runtime probe in createTabState() calls setViewportSize
+// to EXACTLY match innerWidth after Camoufox's spoof settles. That kills
+// both crop and padding in the screenshot -> the VLM gets the exact pixels
+// the page rendered, nothing more, nothing less.
+const CAMOFOX_WINDOW_WIDTH = parseInt(process.env.CAMOFOX_WINDOW_WIDTH) || 1920;
+const CAMOFOX_WINDOW_HEIGHT = parseInt(process.env.CAMOFOX_WINDOW_HEIGHT) || 1080;
 const MAX_SESSIONS = CONFIG.maxSessions;
 const MAX_TABS_PER_SESSION = CONFIG.maxTabsPerSession;
 const MAX_TABS_GLOBAL = CONFIG.maxTabsGlobal;
@@ -527,10 +541,11 @@ async function probeGoogleSearch(candidateBrowser) {
   let context = null;
   try {
     context = await candidateBrowser.newContext({
-      viewport: { width: 1280, height: 720 },
+      viewport: { width: CAMOFOX_WINDOW_WIDTH, height: CAMOFOX_WINDOW_HEIGHT },
       permissions: ['geolocation'],
     });
     const page = await context.newPage();
+    await alignPageViewport(page);
     await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(1200);
     await page.goto('https://www.google.com/search?q=weather%20today', { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -606,6 +621,10 @@ async function launchBrowserInstance() {
         proxy: launchProxy,
         geoip: !!launchProxy,
         virtual_display: vdDisplay,
+        // Pin Camoufox's outerWidth/Height so the stealth fingerprint pool
+        // can't randomly spoof dimensions that mismatch our Playwright
+        // viewport. See CAMOFOX_WINDOW_WIDTH/HEIGHT constants above.
+        window: [CAMOFOX_WINDOW_WIDTH, CAMOFOX_WINDOW_HEIGHT],
       });
       options.proxy = normalizePlaywrightProxy(options.proxy);
       await pluginEvents.emitAsync('browser:launching', { options });
@@ -772,7 +791,7 @@ async function getSession(userId) {
       }
       const b = await ensureBrowser();
       const contextOptions = {
-        viewport: { width: 1280, height: 720 },
+        viewport: { width: CAMOFOX_WINDOW_WIDTH, height: CAMOFOX_WINDOW_HEIGHT },
         permissions: ['geolocation'],
       };
       // When geoip is active (proxy configured), camoufox auto-configures
@@ -979,6 +998,28 @@ function findTab(session, tabId) {
   return null;
 }
 
+// hermes-patches: after Camoufox's stealth layer has spoofed the window
+// dimensions, probe the actual `innerWidth/innerHeight` the page sees and
+// reset Playwright's viewport to match. This keeps page.screenshot() output
+// pixel-aligned with the rendered page — no crop on one side, no black bars
+// on the other. If the probe fails for any reason, leave the Playwright
+// viewport unchanged (defaults to CAMOFOX_WINDOW_WIDTH/HEIGHT from newContext).
+async function alignPageViewport(page) {
+  try {
+    // Tiny navigation-free probe; about:blank is already loaded at newPage.
+    const dims = await page.evaluate(() => ({
+      w: window.innerWidth,
+      h: window.innerHeight,
+    }));
+    if (dims && dims.w > 0 && dims.h > 0) {
+      await page.setViewportSize({ width: dims.w, height: dims.h });
+    }
+  } catch (err) {
+    // Non-fatal: page may have closed between newPage and probe. Log once.
+    log('warn', 'alignPageViewport failed', { error: err.message });
+  }
+}
+
 function createTabState(page) {
   return {
     page,
@@ -1016,6 +1057,7 @@ async function rotateGoogleTab(userId, sessionKey, tabId, previousTabState, reas
   const session = await getSession(userId);
   const group = getTabGroup(session, sessionKey);
   const page = await session.context.newPage();
+  await alignPageViewport(page);
   const tabState = createTabState(page);
   tabState.googleRetryCount = (previousTabState.googleRetryCount || 0) + 1;
   tabState.lastRequestedUrl = previousTabState.lastRequestedUrl;
@@ -1572,8 +1614,9 @@ app.post('/tabs', async (req, res) => {
       }
       
       const group = getTabGroup(session, resolvedSessionKey);
-      
+
       const page = await session.context.newPage();
+      await alignPageViewport(page);
       const tabId = fly.makeTabId();
       const tabState = createTabState(page);
       attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
@@ -1628,6 +1671,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
         }
         {
           const page = await session.context.newPage();
+          await alignPageViewport(page);
           tabState = createTabState(page);
           attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
           const group = getTabGroup(session, resolvedSessionKey);
@@ -1693,6 +1737,7 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           session = await getSession(userId);
           const group = getTabGroup(session, currentSessionKey);
           const page = await session.context.newPage();
+          await alignPageViewport(page);
           tabState = createTabState(page);
           tabState.googleRetryCount = previousRetryCount + 1;
           attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
@@ -2674,8 +2719,9 @@ app.post('/tabs/open', async (req, res) => {
     }
     
     const group = getTabGroup(session, listItemId);
-    
+
     const page = await session.context.newPage();
+    await alignPageViewport(page);
     const tabId = fly.makeTabId();
     const tabState = createTabState(page);
     attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
