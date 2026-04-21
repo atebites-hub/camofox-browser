@@ -270,6 +270,13 @@ const TAB_INACTIVITY_MS = CONFIG.tabInactivityMs;
 // the page rendered, nothing more, nothing less.
 const CAMOFOX_WINDOW_WIDTH = parseInt(process.env.CAMOFOX_WINDOW_WIDTH) || 1920;
 const CAMOFOX_WINDOW_HEIGHT = parseInt(process.env.CAMOFOX_WINDOW_HEIGHT) || 1080;
+// Device pixel ratio. GLM-5V/CogViT handles images up to 6000x6000, and
+// detail matters more than token cost on the Coding plan's per-prompt pool.
+// Default 2 means logical 1920x1080 layout renders at physical 3840x2160 —
+// 4x the pixels for small UI elements (avatars, status icons) while page
+// content still lays out normally. Env-tunable in case the VLM backend
+// changes or we need to reduce latency.
+const CAMOFOX_DEVICE_SCALE_FACTOR = parseFloat(process.env.CAMOFOX_DEVICE_SCALE_FACTOR) || 2;
 const MAX_SESSIONS = CONFIG.maxSessions;
 const MAX_TABS_PER_SESSION = CONFIG.maxTabsPerSession;
 const MAX_TABS_GLOBAL = CONFIG.maxTabsGlobal;
@@ -542,6 +549,7 @@ async function probeGoogleSearch(candidateBrowser) {
   try {
     context = await candidateBrowser.newContext({
       viewport: { width: CAMOFOX_WINDOW_WIDTH, height: CAMOFOX_WINDOW_HEIGHT },
+      deviceScaleFactor: CAMOFOX_DEVICE_SCALE_FACTOR,
       permissions: ['geolocation'],
     });
     const page = await context.newPage();
@@ -792,6 +800,7 @@ async function getSession(userId) {
       const b = await ensureBrowser();
       const contextOptions = {
         viewport: { width: CAMOFOX_WINDOW_WIDTH, height: CAMOFOX_WINDOW_HEIGHT },
+        deviceScaleFactor: CAMOFOX_DEVICE_SCALE_FACTOR,
         permissions: ['geolocation'],
       };
       // When geoip is active (proxy configured), camoufox auto-configures
