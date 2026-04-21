@@ -61,6 +61,22 @@ export async function register(app, ctx, pluginConfig = {}) {
     return result;
   }
 
+  // Periodic checkpoint — saves storage state for every active session on
+  // a timer. Necessary because session:destroyed often fires AFTER the
+  // Playwright context is already closed (especially on ungraceful client
+  // disconnects like gateway restarts). Without a periodic save, login
+  // cookies never reach disk: context.storageState() just errors with
+  // "Target page, context or browser has been closed". With the periodic
+  // save, cookies set during normal use reach disk within
+  // PERSIST_INTERVAL_MS regardless of how the session eventually ends.
+  const PERSIST_INTERVAL_MS = Number(process.env.CAMOFOX_PERSIST_INTERVAL_MS) || 30_000;
+  const periodicTimer = setInterval(async () => {
+    for (const [userId, context] of activeSessions) {
+      await checkpoint(userId, context, 'periodic').catch(() => {});
+    }
+  }, PERSIST_INTERVAL_MS);
+  if (typeof periodicTimer.unref === 'function') periodicTimer.unref();
+
   // --- Lifecycle hooks ---
 
   // Before session context is created: inject storageState if we have one saved
@@ -110,8 +126,9 @@ export async function register(app, ctx, pluginConfig = {}) {
     }
   });
 
-  // On shutdown: checkpoint all remaining sessions
+  // On shutdown: checkpoint all remaining sessions and stop the periodic timer
   events.on('server:shutdown', async () => {
+    clearInterval(periodicTimer);
     for (const [userId, context] of activeSessions) {
       await checkpoint(userId, context, 'shutdown').catch(() => {});
     }
